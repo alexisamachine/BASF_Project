@@ -1,0 +1,505 @@
+#pragma kernel CSMainSpecular
+#pragma kernel CSMainDiffuse
+
+#include "UnityPBSLighting.cginc"
+
+// Declare missing Unity macros:
+// #if defined(SHADER_API_D3D11) || defined(SHADER_API_XBOXONE) || defined(UNITY_COMPILER_HLSLCC) || defined(SHADER_API_PSSL)
+#if defined(SHADER_API_D3D11) || defined(SHADER_API_XBOXONE) || defined(UNITY_COMPILER_HLSLCC) || defined(SHADER_API_PSSL) || (defined(SHADER_TARGET_SURFACE_ANALYSIS) && !defined(SHADER_TARGET_SURFACE_ANALYSIS_MOJOSHADER) && UNITY_VERSION >= 201800)
+    #define UNITY_SAMPLE_TEX2D_LOD(tex,coord,lod) tex.SampleLevel (sampler##tex,coord,lod)
+#else
+    #define UNITY_SAMPLE_TEX2D_LOD(tex,coord,lod) tex2Dlod (tex,float4(coord.x,coord.y,0,lod))
+#endif // SHADER_API_*
+
+int _SkySize;
+UNITY_DECLARE_TEXCUBE(_Sky);
+
+UNITY_DECLARE_TEX2D(_BRDFColorLUT);
+float4 _BRDFColorLUT_TexelSize;
+float _BRDFColorLUTScale;
+
+float3 _CTCoeffs;
+float3 _CTSpreads;
+float3 _CTF0s;
+float  _CCIOR;
+float  _CCNoRefraction;
+
+float _NdotV;
+
+// Dimensions of the output texture
+int _OutWidth;
+int _OutHeight;
+RWTexture2DArray<float4> _OutColor;
+
+
+#define Sq(x) ((x)*(x))
+
+#define SQRT_2      1.41421356237309504880
+#define SQRT_3      1.73205080756887729353
+#define SQRT_5      2.23606797749978969641
+#define SQRT_7      2.64575131106459059050
+#define SQRT_11     3.31662479035539984911
+#define SQRT_13     3.60555127546398929312
+#define PI          UNITY_PI
+
+#define LUMINANCE float3(0.2126729, 0.7151522, 0.0721750)
+
+float3 PseudoRandom3D(int2 xy)
+{
+    float3x2 coeffs = float3x2(
+        SQRT_2, SQRT_13,
+        SQRT_11, SQRT_3,
+        SQRT_5, SQRT_7
+    );
+
+    return frac(sin(mul(coeffs, float2(xy))) * 43758.5453);
+}
+
+float3x3 GetLocalFrame(float3 localZ)
+{
+    float x  = localZ.x;
+    float y  = localZ.y;
+    float z  = localZ.z;
+    float sz = sign(z);
+    float a  = 1 / (sz + z);
+    float ya = y * a;
+    float b  = x * ya;
+    float c  = x * sz;
+
+    float3 localX = float3(c * x * a - 1, sz * b, c);
+    float3 localY = float3(b, y * ya - sz, y);
+
+    // Note: due to the quaternion formulation, the generated frame is rotated by 180 degrees,
+    // s.t. if localZ = {0, 0, 1}, then localX = {-1, 0, 0} and localY = {0, -1, 0}.
+    return float3x3(localX, localY, localZ);
+}
+
+float3 GetWorldDirFromCubemapUV(float2 uv, int face)
+{
+    /*
+    const float3x3 cubemapFaceToWorldMats[6] = {
+        // positive X
+        float3x3( 0, 0,-1,
+                  0,-1, 0,
+                  1, 0, 0),
+        // negative X
+        float3x3( 0, 0, 1,
+                  0,-1, 0,
+                 -1, 0, 0),
+        // positive Y
+        float3x3( 1, 0, 0,
+                  0, 0, 1,
+                  0, 1, 0),
+        // negative Y
+        float3x3( 1, 0, 0,
+                  0, 0,-1,
+                  0,-1, 0),
+        // positive Z
+        float3x3( 1, 0, 0,
+                  0,-1, 0,
+                  0, 0, 1),
+        // negative Z
+        float3x3(-1, 0, 0,
+                  0,-1, 0,
+                  0, 0,-1)
+    };
+    */
+
+    float3x3 faceWorldMat = float3x3(0,0,0,0,0,0,0,0,0);
+    if (face == 0)
+    {
+        // positive X
+        faceWorldMat = float3x3( 0, 0,-1,
+                    0,-1, 0,
+                    1, 0, 0);
+    }
+    else if (face == 1)
+    {
+        // negative X
+        faceWorldMat = float3x3( 0, 0, 1,
+                0,-1, 0,
+                -1, 0, 0);
+    }
+    else if (face == 2)
+    {
+        // positive Y
+        faceWorldMat = float3x3( 1, 0, 0,
+                0, 0, 1,
+                0, 1, 0);
+    }
+    else if (face == 3)
+    {
+        // negative Y
+        faceWorldMat = float3x3( 1, 0, 0,
+                0, 0,-1,
+                0,-1, 0);
+    }
+    else if (face == 4)
+    {
+        // positive Z
+        faceWorldMat = float3x3( 1, 0, 0,
+                0,-1, 0,
+                0, 0, 1);
+    }
+    else if (face == 5)
+    {
+        // negative Z
+        faceWorldMat = float3x3(-1, 0, 0,
+                0,-1, 0,
+                0, 0,-1);
+    }
+
+    float3 faceDir = normalize(float3(uv, 1));
+    float3 worldDir = mul(faceDir, faceWorldMat);
+
+    return normalize(worldDir);
+}
+
+
+float F_Schlick(float F0, float cosTheta)
+{
+    float d = 1 - cosTheta;
+    float d2 = d*d;
+    return F0 + (1 - F0) * d2*d2*d;
+}
+
+float G_CookTorrance(float NdotV, float NdotL, float NdotH, float HdotV)
+{
+    return min(min( (2.0 * NdotH * NdotV / HdotV), (2.0 * NdotH * NdotL / HdotV) ), 1);
+}
+
+float D_Beckmann(float NoH, float roughness)
+{
+    if (roughness == 0)
+        return 0;
+
+    float NoH_sqr = Sq(NoH);
+    float m_sqr = Sq(roughness);
+    float e = (NoH_sqr - 1) / (NoH_sqr*m_sqr);
+    return exp(e) / (PI * m_sqr * Sq(NoH_sqr));
+}
+
+float ClearCoatAttenuation(float3 lightDirAboveWS, float3 viewDirAboveWS, float3 normalWS, float eta)
+{
+    // This is the clear coat attenuation used with AxF clear coats!
+    // This includes transmission air->coat and coat->air.
+    // all directions are above the clear coat.
+
+    float F0 = Sq((1.0 - eta) / (1.0 + eta));
+
+    float refl_light = F_Schlick(F0, dot(normalWS, lightDirAboveWS));
+    float refl_view = F_Schlick(F0, dot(normalWS, viewDirAboveWS));
+
+    return (1 - refl_view) * (1 - refl_light);
+}
+
+
+void sampleHemisphereCosine(float2 uv, out float3 result, out float pdf)
+{
+    float r = sqrt(uv.x);
+    float phi = 2*PI * uv.y;
+
+    float x = r * cos(phi);
+    float y = r * sin(phi);
+    float z = max(0, sqrt(1 - uv.x));
+
+    pdf = z / PI;
+    result = normalize(float3(x, y ,z));
+}
+
+void sampleHemisphereBeckmann(float2 uv, float roughness, out float3 result, out float pdf)
+{
+    // pdf of halfway = D(H) * (N.H)
+    // pdf of light = D(H) * (N.H) / (4 * (L.H))
+
+    // Beckmann NDF sampling
+    float cosTheta = 1 / sqrt(1 - Sq(roughness) * log(1 - uv.x));
+    float sinTheta = sqrt(max(0, 1 - Sq(cosTheta)));
+    float phi      = 2.0*PI* uv.y;
+
+    float x = sinTheta * cos(phi);
+    float y = sinTheta * sin(phi);
+    float z = cosTheta;
+
+    pdf = D_Beckmann(cosTheta, roughness) * cosTheta;
+    result = normalize(float3(x, y, z));
+}
+
+void sampleLightDirFromHalfway(float3 viewDir, float3 halfway, out float3 result, out float pdf)
+{
+    // lightDir is viewDir reflected at halfway.
+    // lightDir PDF 1 PDF wrt. viewDir. i.e. |det(dlightDir/dviewDir)| = 1
+    // lightDir PDF is 1/(4HdotV) wrt. halfway.
+
+    pdf = 1 / (4*abs(dot(viewDir, halfway)));
+    result = reflect(-viewDir, halfway);
+}
+
+void sampleRefraction(float3 inputDir, float3 normal, float eta, out float3 result, out float pdf)
+{
+    float IoN = dot(inputDir, normal);
+    float IoN_sign = sign(IoN);
+
+    // Note: incoming and outgoing ray is already inverted in comparison to OpenGL implementation.
+    float k = 1 - Sq(eta) * (1 - Sq(IoN));
+    if (k < 0)
+    {
+        // TIR
+        pdf = 0;
+        result = float3(0,0,0);
+    }
+    else
+    {
+        // Note: pdf is wrt. inputDir
+        pdf = sqrt(k) / (Sq(eta) * abs(IoN));
+        result = eta * inputDir - (eta * IoN - IoN_sign * sqrt(k)) * normal;
+    }
+}
+
+
+float3 SampleBRDFColorLUT(float NdotH_below, float HdotV_below)
+{
+    float theta_f = acos(clamp(NdotH_below, -1, 1));
+    float theta_i = acos(clamp(HdotV_below, -1, 1));
+
+    float2 uv = float2(theta_f, theta_i) / (0.5 * PI);
+    uv += 0.5*_BRDFColorLUT_TexelSize.xy;
+    float3 color_lut = UNITY_SAMPLE_TEX2D_LOD(_BRDFColorLUT, uv, 0).xyz;
+    return color_lut * _BRDFColorLUTScale;
+}
+
+
+
+float3 IntegrateSpecularColor(float3 reflDirWS, float NdotV, int sampleCount, int pixelIndex)
+{
+    float3x3 reflDirFrame = GetLocalFrame(reflDirWS);
+
+    float cosThetaView = NdotV;
+    float sinThetaView = sqrt(1 - Sq(cosThetaView));
+
+    float3 acc = float3(0,0,0);
+    float acc_weight = 0;
+
+    for (int i = 0; i < sampleCount; ++i)
+    {
+        float3 uvw = PseudoRandom3D(int2(i, pixelIndex));
+
+        // Sample normalWS and viewDirWS
+        float normalPhi = 2*PI * uvw.z;
+        float cosNormalPhi = cos(normalPhi);
+        float sinNormalPhi = sin(normalPhi);
+
+        float3 normalRS = float3(sinThetaView * cosNormalPhi, sinThetaView * sinNormalPhi, cosThetaView);
+        float3 normalWS = mul(normalRS, reflDirFrame);
+
+        float3x3 localFrame = GetLocalFrame(normalWS);
+
+        float3 viewDirAboveWS = reflect(-reflDirWS, normalWS);
+        float3 viewDirBelowWS = viewDirAboveWS;
+        if (_CCNoRefraction == 0 && _CCIOR > 1)
+            viewDirBelowWS = -refract(-viewDirAboveWS, normalWS, 1/_CCIOR);
+
+        float NdotV_below = dot(normalWS, viewDirBelowWS);
+        if (NdotV_below < 1e-3)
+            continue;
+
+        // Sample BRDF
+
+        float2 uv = uvw.xy;
+
+        float3 lobeWeight = _CTCoeffs * _CTF0s / dot(_CTCoeffs, _CTF0s);
+        float2 cumLobeWeight = float2(lobeWeight.x, lobeWeight.x + lobeWeight.y); // last entry is trivially 1
+        int lobeIndex = 0;
+        if (uv.x < cumLobeWeight.x)
+        {
+            lobeIndex = 0;
+            uv.x /= lobeWeight.x;
+        }
+        else if (uv.x < cumLobeWeight.y)
+        {
+            lobeIndex = 1;
+            uv.x = (uv.x - cumLobeWeight.x) / lobeWeight.y;
+        }
+        else
+        {
+            lobeIndex = 2;
+            uv.x = (uv.x - cumLobeWeight.y) / lobeWeight.z;
+        }
+        float lobeRoughness = _CTSpreads[lobeIndex];
+
+        float3 halfwayBelowOS;
+        float ignoreHalfwayBelowPdf;
+        sampleHemisphereBeckmann(uv, lobeRoughness, halfwayBelowOS, ignoreHalfwayBelowPdf);
+        float3 halfwayBelowWS = mul(halfwayBelowOS, localFrame);
+        // Recompute halfwayBelowPdf = sum_i weight[i] * D(NdotH, roughness[i])*NdotH
+        float halfwayBelowPdf = 0;
+        for (int i = 0; i < 3; ++i)
+            halfwayBelowPdf += lobeWeight[i] * D_Beckmann(halfwayBelowOS.z, _CTSpreads[i]) * halfwayBelowOS.z;
+
+        float3 lightDirBelowWS;
+        float lightDirBelowPdf;
+        sampleLightDirFromHalfway(viewDirBelowWS, halfwayBelowWS, lightDirBelowWS, lightDirBelowPdf);
+        lightDirBelowPdf *= halfwayBelowPdf;
+
+        float NdotL_below = dot(normalWS, lightDirBelowWS);
+        // Handle light below horizon
+        if (NdotL_below < 1e-3)
+            continue;
+
+        float3 lightDirAboveWS = lightDirBelowWS;
+        float lightDirAbovePdf = 1;
+        if (_CCNoRefraction == 0 && _CCIOR > 1)
+            sampleRefraction(lightDirBelowWS, normalWS, _CCIOR/1, lightDirAboveWS, lightDirAbovePdf);
+        lightDirAbovePdf *= lightDirBelowPdf;
+
+        // Handle TIR
+        if (lightDirAbovePdf <= 0)
+            continue;
+
+        float ccAtten = _CCIOR > 1 ? ClearCoatAttenuation(lightDirAboveWS, viewDirAboveWS, normalWS, 1/_CCIOR) : 1.0;
+
+        float NdotH_below = dot(normalWS, halfwayBelowWS);
+        float HdotV_below = dot(viewDirBelowWS, halfwayBelowWS);
+
+        float NdotL_above = dot(normalWS, lightDirAboveWS);
+
+        float specularBRDF = 0;
+        for (int j = 0; j < 3; ++j)
+        {
+            specularBRDF += _CTCoeffs[j] * D_Beckmann(NdotH_below, _CTSpreads[j]) * F_Schlick(_CTF0s[j], HdotV_below);
+        }
+        specularBRDF *= G_CookTorrance(NdotV_below, NdotL_below, NdotH_below, HdotV_below) / (NdotV_below * NdotL_below);
+
+        float brdfValue = ccAtten * specularBRDF * NdotL_above;
+
+        // Sample BRDF color
+        float3 brdfColor = SampleBRDFColorLUT(NdotH_below, HdotV_below);
+
+        // Sample environment map
+        float omegaS      = 1.0/(sampleCount * lightDirAbovePdf);
+        float omegaP      = 4.0*PI / (6.0 * Sq(_SkySize));
+        float mipmapLevel = 0.5*log2(omegaS / omegaP)+1;
+
+        float3 L = UNITY_SAMPLE_TEXCUBE_LOD(_Sky, lightDirAboveWS, mipmapLevel);
+
+        // TODO handle more color weighting
+        float weight = dot(LUMINANCE, L) * brdfValue / lightDirAbovePdf;
+
+        acc += weight * brdfColor;
+        acc_weight += weight;
+    }
+
+    return acc / acc_weight;
+}
+
+float3 IntegrateDiffuseColor(float3 normalWS, float NdotV, int sampleCount, int pixelIndex)
+{
+    float3x3 localFrame = GetLocalFrame(normalWS);
+
+    float cosThetaView = NdotV;
+    float sinThetaView = sqrt(1 - Sq(cosThetaView));
+
+    float3 acc = float3(0,0,0);
+    float acc_weight = 0;
+
+    // Diffuse lobe parameterized by normalWS and not reflDirWS!!
+
+    for (int i = 0; i < sampleCount; ++i)
+    {
+        float3 uvw = PseudoRandom3D(int2(i, pixelIndex));
+
+        // Sample viewDirWS
+        float phiView = 2*PI * uvw.z;
+        float cosPhiView = cos(phiView);
+        float sinPhiView = sin(phiView);
+
+        float3 viewDirAboveOS = float3(sinThetaView * cosPhiView, sinThetaView * sinPhiView, cosThetaView);
+        float3 viewDirAboveWS = mul(viewDirAboveOS, localFrame);
+        float3 viewDirBelowWS = viewDirAboveWS;
+        if (_CCNoRefraction == 0 && _CCIOR > 1)
+            viewDirBelowWS = -refract(-viewDirAboveWS, normalWS, 1/_CCIOR);
+
+        // Sample BRDF
+
+        float2 uv = uvw.xy;
+
+        float3 lightDirAboveOS;
+        float lightDirAbovePdf;
+        sampleHemisphereCosine(uv, lightDirAboveOS, lightDirAbovePdf);
+        float3 lightDirAboveWS = mul(lightDirAboveOS, localFrame);
+
+        float NdotL_above = dot(normalWS, lightDirAboveWS);
+        // Handle light below horizon
+        if (NdotL_above < 1e-3)
+            continue;
+
+        float3 lightDirBelowWS = lightDirAboveWS;
+        if (_CCNoRefraction == 0 && _CCIOR > 1)
+            lightDirBelowWS = -refract(-lightDirAboveWS, normalWS, 1/_CCIOR);
+
+        float ccAtten = _CCIOR > 1 ? ClearCoatAttenuation(lightDirAboveWS, viewDirAboveWS, normalWS, _CCIOR) : 1.0;
+
+        float3 halfwayBelowWS = normalize(viewDirBelowWS + lightDirBelowWS);
+        float NdotH_below = dot(normalWS, halfwayBelowWS);
+        float HdotV_below = dot(viewDirBelowWS, halfwayBelowWS);
+
+        float diffuseBRDF = NdotL_above; //  * _CTDiffuse / PI // This will canceled out!
+
+        float brdfValue = ccAtten * diffuseBRDF;
+
+        // Sample BRDF color
+        float3 brdfColor = SampleBRDFColorLUT(NdotH_below, HdotV_below);
+
+        // Sample environment map
+        float omegaS      = 1.0/(sampleCount * lightDirAbovePdf);
+        float omegaP      = 4.0*PI / (6.0 * Sq(_SkySize));
+        float mipmapLevel = 0.5*log2(omegaS / omegaP)+1;
+
+        float3 L = UNITY_SAMPLE_TEXCUBE_LOD(_Sky, lightDirAboveWS, mipmapLevel);
+
+        // TODO handle more color weighting
+        float weight = dot(LUMINANCE, L) * brdfValue / lightDirAbovePdf;
+
+        acc += weight * brdfColor;
+        acc_weight += weight;
+    }
+
+    return acc / acc_weight;
+}
+
+
+[numthreads(8,8,1)]
+void CSMainSpecular (uint3 tid : SV_DispatchThreadID)
+{
+    float2 uv = (float2(tid.xy)+0.5) / float2(_OutWidth, _OutHeight) * 2 - 1;
+    int face = tid.z;
+    float3 reflDirWS = GetWorldDirFromCubemapUV(uv, face);
+
+    // Varying NdotV
+    float NdotV = _NdotV;
+
+    int sampleCount = 4096;
+    int pixelIndex = tid.y * _OutWidth + tid.x;
+
+    float3 specularColor = IntegrateSpecularColor(reflDirWS, NdotV, sampleCount, pixelIndex);
+
+    _OutColor[tid.xyz] = float4(specularColor, 1);
+}
+
+[numthreads(8,8,1)]
+void CSMainDiffuse (uint3 tid : SV_DispatchThreadID)
+{
+    float2 uv = (float2(tid.xy)+0.5) / float2(_OutWidth, _OutHeight) * 2 - 1;
+    int face = tid.z;
+    float3 reflDirWS = GetWorldDirFromCubemapUV(uv, face);
+
+    // Varying NdotV
+    float NdotV = _NdotV;
+
+    int sampleCount = 4096;
+    int pixelIndex = tid.y * _OutWidth + tid.x;
+
+    float3 diffuseColor = IntegrateDiffuseColor(reflDirWS, NdotV, sampleCount, pixelIndex);
+
+    _OutColor[tid.xyz] = float4(diffuseColor, 1);
+}

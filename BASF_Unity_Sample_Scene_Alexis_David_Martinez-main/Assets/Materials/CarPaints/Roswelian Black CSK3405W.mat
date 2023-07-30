@@ -1,0 +1,157 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Roswelian Black CSK3405W
+  m_Shader: {fileID: 4800000, guid: 143a2df67db64d692a7c3f6ec24a8ec4, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords:
+  - CLEAR_COAT
+  - USE_FULL_BRDF_MODEL
+  - USE_FULL_COLOR_LUT_POINT_LIGHTS
+  - USE_INTEGRATED_COLOR
+  - USE_SIMPLE_FLAKES
+  - USE_UV_MIRRORING
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: 2000
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _BRDFColorLUT:
+        m_Texture: {fileID: 2800000, guid: 6ac8ef892fe7e8145965de77c5ebac1a, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkyDiffuse:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkyDiffuseArray:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkyDiffuseCubemap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkyDiffuseSH:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkySpecular:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkySpecularArray:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkySpecularCubemap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BRDFColorLUTxSkySpecularSH:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _FullFlakesColorMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _FullFlakesColorScaleOffsetMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _FullFlakesInvStdDevMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _FullFlakesSliceLUT:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _IntegratedColorLUT1D:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _PreIntegratedFGD:
+        m_Texture: {fileID: 2800000, guid: 0030d3a6675803444aa3ce35879f19a8, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _SimpleFlakesColorMap:
+        m_Texture: {fileID: 2800000, guid: aa91f5db7bef36d42abab363fc8e5419, type: 2}
+        m_Scale: {x: 30, y: 30}
+        m_Offset: {x: 0, y: 0}
+    - _SimpleFlakesColorMap3D:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _AddPrecomputedVelocity: 0
+    - _AxF2UnityImportVersionMajor: 1
+    - _AxF2UnityImportVersionMinor: 2
+    - _AxF2UnityImportVersionPatch: 1
+    - _AxF2UnityVersionMajor: 1
+    - _AxF2UnityVersionMinor: 2
+    - _AxF2UnityVersionPatch: 1
+    - _BRDFColorLUTxSkyDiffuseScale: 1
+    - _BRDFColorLUTxSkySpecularScale: 1
+    - _BRDFColorLUTxSky_ArraySize: 1
+    - _BRDFColorMode: 0
+    - _BRDFMode: 1
+    - _BlendMode: 0
+    - _ClearCoatF0: 0.040000003
+    - _ClearCoatF90: 1
+    - _ClearCoatIOR: 1.5
+    - _CullMode: 2
+    - _DstBlend: 0
+    - _EnableClearCoat: 1
+    - _EnableFlakes: 1
+    - _FlakesMode: 0
+    - _FlakesSmoothness: 0.55225825
+    - _FullFlakesMaxThetaF: 0
+    - _FullFlakesMaxThetaI: 0
+    - _FullFlakesNumThetaF: 0
+    - _FullFlakesNumThetaI: 0
+    - _GGXSmoothness: 0.54161793
+    - _ReceivesSSR: 1
+    - _SimpleFlakesColorOffset: -42.715763
+    - _SimpleFlakesColorOffset3D: 0
+    - _SimpleFlakesColorScale: 0.002651408
+    - _SimpleFlakesColorScale3D: 1
+    - _SortPriority: 0
+    - _SrcBlend: 1
+    - _StencilRef: 0
+    - _StencilRefDepth: 8
+    - _StencilRefMV: 40
+    - _StencilWriteMask: 6
+    - _StencilWriteMaskDepth: 14
+    - _StencilWriteMaskMV: 40
+    - _SupportDecals: 1
+    - _UVTilingGridSize: 1
+    - _UVTilingMode: 1
+    - _UseBRDFColorLUTForPointLights: 1
+    - _UseFlakesSmoothness: 0
+    - _ZWrite: 1
+    m_Colors:
+    - _BRDFColorLUTxSkyDiffuseMeanColor: {r: 0, g: 0, b: 0, a: 0}
+    - _BRDFColorLUTxSkySpecularMeanColor: {r: 0, g: 0, b: 0, a: 0}
+    - _CTCoeffs: {r: 0.0007233461, g: 0.0000058882056, b: 0.000233018, a: 0.00307963}
+    - _CTF0s: {r: 0.6087932, g: 0.9833768, b: 0.9835028, a: 0}
+    - _CTSpreads: {r: 0.12302494, g: 0.12580395, b: 0.30831316, a: 0}
+    - _DiffuseColor: {r: 0.76738006, g: 0.82651806, b: 0.94867224, a: 0.6956522}
+    - _PreIntegratedFGDScale: {r: 0.0051232125, g: 0.98563635, b: 0.010864833, a: 1}
+    - _SpecularColor: {r: 0.7558622, g: 0.8276727, b: 0.95630306, a: 0.6956522}
+  m_BuildTextureStacks: []

@@ -1,0 +1,8 @@
+{
+    "name": "AxF2Unity.Editor",
+    "references": [ "AxF2Unity.Runtime" ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "allowUnsafeCode" : true
+}

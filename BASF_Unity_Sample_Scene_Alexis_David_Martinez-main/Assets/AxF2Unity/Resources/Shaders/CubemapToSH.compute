@@ -1,0 +1,320 @@
+#pragma kernel CSMainCoefficients
+#pragma kernel CSMainReduce
+#pragma kernel CSMainReduceFinal
+
+#include "UnityPBSLighting.cginc"
+
+#define Sq(x) ((x)*(x))
+
+float3 GetWorldDirFromCubemapUV(float2 uv, int face)
+{
+    /*
+    const float3x3 cubemapFaceToWorldMats[6] = {
+        // positive X
+        float3x3( 0, 0,-1,
+                  0,-1, 0,
+                  1, 0, 0),
+        // negative X
+        float3x3( 0, 0, 1,
+                  0,-1, 0,
+                 -1, 0, 0),
+        // positive Y
+        float3x3( 1, 0, 0,
+                  0, 0, 1,
+                  0, 1, 0),
+        // negative Y
+        float3x3( 1, 0, 0,
+                  0, 0,-1,
+                  0,-1, 0),
+        // positive Z
+        float3x3( 1, 0, 0,
+                  0,-1, 0,
+                  0, 0, 1),
+        // negative Z
+        float3x3(-1, 0, 0,
+                  0,-1, 0,
+                  0, 0,-1)
+    };
+    */
+
+    float3x3 faceWorldMat = float3x3(0,0,0,0,0,0,0,0,0);
+    if (face == 0)
+    {
+        // positive X
+        faceWorldMat = float3x3( 0, 0,-1,
+                    0,-1, 0,
+                    1, 0, 0);
+    }
+    else if (face == 1)
+    {
+        // negative X
+        faceWorldMat = float3x3( 0, 0, 1,
+                0,-1, 0,
+                -1, 0, 0);
+    }
+    else if (face == 2)
+    {
+        // positive Y
+        faceWorldMat = float3x3( 1, 0, 0,
+                0, 0, 1,
+                0, 1, 0);
+    }
+    else if (face == 3)
+    {
+        // negative Y
+        faceWorldMat = float3x3( 1, 0, 0,
+                0, 0,-1,
+                0,-1, 0);
+    }
+    else if (face == 4)
+    {
+        // positive Z
+        faceWorldMat = float3x3( 1, 0, 0,
+                0,-1, 0,
+                0, 0, 1);
+    }
+    else if (face == 5)
+    {
+        // negative Z
+        faceWorldMat = float3x3(-1, 0, 0,
+                0,-1, 0,
+                0, 0,-1);
+    }
+
+    float3 faceDir = normalize(float3(uv, 1));
+    float3 worldDir = mul(faceDir, faceWorldMat);
+
+    return normalize(worldDir);
+}
+
+float4 ComputeSHCoefficient(uint shCoefficientsIndex, float3 worldDir, float3 colorValue)
+{
+    if (shCoefficientsIndex < 3)
+    {
+        // shAr, shAg, shAb
+        float4 vA = float4(worldDir, 1.0);
+        vA *= float4(3.0, 3.0, 3.0, 1.0) / (4.0*UNITY_PI);
+        return colorValue[shCoefficientsIndex] * vA;
+    }
+    if (shCoefficientsIndex < 6)
+    {
+        // shBr, shBg, shBb
+        float4 vB = worldDir.xyzz * worldDir.yzzx;
+        vB.z = 3*vB.z - 1;
+        vB *= float2(15, 1.25).xxyx / (4*UNITY_PI);
+        return colorValue[shCoefficientsIndex-3] * vB;
+    }
+    // shCrgb0
+    float vC = Sq(worldDir.x) - Sq(worldDir.y);
+    vC *= 15 / (16*UNITY_PI);
+    return float4(colorValue * vC, 0);
+}
+
+
+
+RWTexture2DArray<float4> _Input;
+RWTexture2DArray<float4> _Output;
+
+int3 _InputSize;
+
+int3 _DispatchSize;
+
+int _SHCoefficientsIndex;
+
+RWTexture2D<float4> _FinalOutput;
+uint2 _FinalOutputIndex;
+
+groupshared float4 _SharedData[64];
+
+[numthreads(8,8,1)]
+void CSMainCoefficients(
+    uint3 groupID : SV_GroupID,
+    uint3 localThreadID : SV_GroupThreadID, // local tid
+    uint3 globalThreadID : SV_DispatchThreadID // global tid
+)
+{
+    uint3 inputIndex = globalThreadID;
+    uint3 outputIndex = inputIndex;
+
+    // Compute viewport coordinate from launch parameters
+    float2 viewportCoord = (float2(2*inputIndex.xy) + 1) / float2(_InputSize.xy) - 1;
+    int cubemapIndex = inputIndex.z / 6;
+    int cubemapFace = inputIndex.z % 6;
+
+    // Account for distortion in "integration domain" (here: cubemap face)
+    float projectedPixelArea = pow(1 + dot(viewportCoord, viewportCoord), -1.5);
+
+    // Compute world-space direction
+    float3 worldDir = GetWorldDirFromCubemapUV(viewportCoord, cubemapFace);
+
+    // Load color value
+    float3 colorValue = _Input[inputIndex].xyz;
+
+    // Compute SH coefficient
+    float4 result = ComputeSHCoefficient(_SHCoefficientsIndex, worldDir, colorValue);
+    result *= projectedPixelArea * 4 / (_InputSize.x * _InputSize.y);
+
+    _Output[outputIndex] = result;
+}
+
+
+[numthreads(8,8,1)]
+void CSMainReduce(
+    uint3 groupID : SV_GroupID,
+    uint3 localThreadID : SV_GroupThreadID, // local tid
+    uint3 globalThreadID : SV_DispatchThreadID // global tid
+)
+{
+    const uint3 groupSize = uint3(8, 8, 1);
+
+    // Linearized local thread ID
+    uint linearLocalThreadID = (localThreadID.z * groupSize.y + localThreadID.y) * groupSize.x + localThreadID.x;
+
+    // Iterate over whole 2d array in steps of "globalGridSize"
+    float4 acc = float4(0,0,0,0);
+    for (uint k = globalThreadID.z; k < _InputSize.z; k += _DispatchSize.z * groupSize.z)
+    {
+        float4 accj = float4(0,0,0,0);
+        for (uint j = globalThreadID.y; j < _InputSize.y; j += _DispatchSize.y * groupSize.y)
+        {
+            float4 acci = float4(0,0,0,0);
+            for (uint i = globalThreadID.x; i < _InputSize.x; i += _DispatchSize.x * groupSize.x)
+            {
+                float4 value = _Input[uint3(i, j, k)];
+                acci += value;
+            }
+            accj += acci;
+        }
+        acc += accj;
+    }
+    _SharedData[linearLocalThreadID] = acc;
+
+
+
+    // Final reduce in shared memory
+    GroupMemoryBarrierWithGroupSync();
+
+    if (linearLocalThreadID < 32)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 32];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 16)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 16];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 8)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 8];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 4)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 4];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 2)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 2];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 1)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 1];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID == 0)
+    {
+        _Output[groupID] = _SharedData[0];
+    }
+}
+
+
+[numthreads(8,8,1)]
+void CSMainReduceFinal(
+    uint3 groupID : SV_GroupID,
+    uint3 localThreadID : SV_GroupThreadID, // local tid
+    uint3 globalThreadID : SV_DispatchThreadID // global tid
+)
+{
+    const uint3 groupSize = uint3(8, 8, 1);
+
+    // Linearized local thread ID
+    uint linearLocalThreadID = (localThreadID.z * groupSize.y + localThreadID.y) * groupSize.x + localThreadID.x;
+
+    // Iterate over whole 2d array in steps of "globalGridSize"
+    float4 acc = float4(0,0,0,0);
+    for (uint k = globalThreadID.z; k < _InputSize.z; k += groupSize.z) // dispatch size = (1,1,1)
+    {
+        float4 accj = float4(0,0,0,0);
+        for (uint j = globalThreadID.y; j < _InputSize.y; j += groupSize.y)
+        {
+            float4 acci = float4(0,0,0,0);
+            for (uint i = globalThreadID.x; i < _InputSize.x; i += groupSize.x)
+            {
+                float4 value = _Input[uint3(i, j, k)];
+                acci += value;
+            }
+            accj += acci;
+        }
+        acc += accj;
+    }
+    _SharedData[linearLocalThreadID] = acc;
+
+
+
+    // Final reduce in shared memory
+    GroupMemoryBarrierWithGroupSync();
+
+    if (linearLocalThreadID < 32)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 32];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 16)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 16];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 8)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 8];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 4)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 4];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 2)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 2];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID < 1)
+    {
+        _SharedData[linearLocalThreadID] += _SharedData[linearLocalThreadID + 1];
+    }
+    GroupMemoryBarrier();
+
+    if (linearLocalThreadID == 0)
+    {
+        // _SharedData[0] = float4(0,0,0,0);
+        // if (_FinalOutputIndex.y == 0)
+        //     _SharedData[0].zw = 1;
+        // There shall just be one thread group for the final output!
+        _FinalOutput[_FinalOutputIndex] = _SharedData[0];
+    }
+}

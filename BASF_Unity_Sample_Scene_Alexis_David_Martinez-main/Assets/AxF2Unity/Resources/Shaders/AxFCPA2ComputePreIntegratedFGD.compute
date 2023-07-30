@@ -1,0 +1,355 @@
+#pragma kernel CSMain
+
+///#include "UnityPBSLighting.cginc"
+
+#define Sq(x) ((x)*(x))
+#define PI          3.14159265358979323846
+
+
+float  _CCIOR;
+float  _CCNoRefraction;
+
+float4 _CTCoeffs;
+float4 _CTF0s;
+float4 _CTSpreads;
+
+float _GGXSmoothness;
+
+// Dimensions of the output texture
+int _OutputWidth;
+// int _OutputHeight; = 1
+RWTexture2D<float4> _Output;
+
+
+
+float SmoothnessToRoughness(float smoothness)
+{
+    return (1 - smoothness) * (1 - smoothness);
+}
+
+float VanDerCorputBase2(uint i)
+{
+    return float(reversebits(i) + 0.5) / 4294967296.0; // 2^-32
+}
+
+float2 Hammersley2D(uint i, uint sequenceLength)
+{
+    // Don't sample the limits!
+    return float2(float(i + 0.5) / float(sequenceLength), VanDerCorputBase2(i));
+}
+
+
+float F_Schlick(float F0, float cosTheta)
+{
+    float d = 1 - cosTheta;
+    float d2 = d*d;
+    return F0 + (1 - F0) * d2*d2*d;
+}
+
+float3 F_Schlick(float3 F0, float cosTheta)
+{
+    float d = 1 - cosTheta;
+    float d2 = d*d;
+    return F0 + (1 - F0) * d2*d2*d;
+}
+
+float G_CookTorrance(float NdotV, float NdotL, float NdotH, float HdotV)
+{
+    return min(min( (2.0 * NdotH * NdotV / HdotV), (2.0 * NdotH * NdotL / HdotV) ), 1);
+}
+
+float V_SmithJointGGX(float NoL, float NoV, float roughness)
+{
+    float a2 = Sq(roughness);
+    float lambdaV = NoL * sqrt(NoV * (1 - a2) * NoV + a2);
+    float lambdaL = NoV * sqrt(NoL * (1 - a2) * NoL + a2);
+    return 0.5 / (lambdaV + lambdaL);
+}
+
+float V_SmithJointGGX_DRoughness(float NoL, float NoV, float roughness)
+{
+    float a2 = Sq(roughness);
+    float lambdaV = NoL * sqrt(NoV * (1 - a2) * NoV + a2);
+    float lambdaL = NoV * sqrt(NoL * (1 - a2) * NoL + a2);
+    return 0.5 / (lambdaV + lambdaL);
+}
+
+float D_Beckmann(float NdotH, float roughness)
+{
+    if (roughness == 0)
+    {
+        return 0;
+    }
+
+    float NdotH_sqr = Sq(NdotH);
+    float m_sqr = Sq(roughness);
+    float e = (NdotH_sqr - 1) / (NdotH_sqr*m_sqr);
+    return exp(e) / (PI * m_sqr * Sq(NdotH_sqr));
+}
+
+float3 SampleHemisphereBeckmann(float2 uv, float roughness)
+{
+    // pdf of halfway = D(H) * (N.H)
+    // pdf of light = D(H) * (N.H) / (4 * (L.H))
+
+    // Beckmann NDF sampling
+    float cosTheta = 1 / sqrt(1 - Sq(roughness) * log(1 - uv.x));
+    float sinTheta = sqrt(max(0, 1 - Sq(cosTheta)));
+    float phi      = 2.0*PI* uv.y;
+
+    float x = sinTheta * cos(phi);
+    float y = sinTheta * sin(phi);
+    float z = cosTheta;
+
+    return normalize(float3(x, y, z));
+}
+
+float3 SampleHemisphereGGX(float2 uv, float roughness)
+{
+    // pdf of halfway = D(H) * (N.H)
+    // pdf of light = D(H) * (N.H) / (4 * (L.H))
+
+    // GGX NDF sampling
+    float cosTheta = sqrt((1 - uv.x) / (1 + (Sq(roughness) - 1) * uv.x));
+    float sinTheta = sqrt(max(0, 1 - Sq(cosTheta)));
+    float phi      = 2.0*PI * uv.y;
+
+    float x = sinTheta * cos(phi);
+    float y = sinTheta * sin(phi);
+    float z = cosTheta;
+
+    return normalize(float3(x, y, z));
+}
+
+float RefractionPDF(float3 inputDir, float3 normal, float eta)
+{
+    float IoN = dot(inputDir, normal);
+
+    // Note: incoming and outgoing ray is already inverted in comparison to OpenGL implementation.
+    float k = 1 - Sq(eta) * (1 - Sq(IoN));
+    if (k < 0)
+    {
+        // TIR
+        return 0;
+    }
+    else
+    {
+        // Note: pdf is wrt. inputDir
+        return sqrt(k) / (Sq(eta) * abs(IoN));
+    }
+}
+
+
+float IntegrateFGD_AxFCPA2(float NdotV, uint beginSampleIndex, uint endSampleIndex, uint sampleCount)
+{
+    float3 normalTS = float3(0, 0, 1);
+
+    float cosThetaView = NdotV;
+    float sinThetaView = sqrt(1 - Sq(cosThetaView));
+    float3 viewDirAboveTS = float3(sinThetaView, 0, cosThetaView);
+
+    float3 viewDirBelowTS = viewDirAboveTS;
+    if (_CCNoRefraction == 0 && _CCIOR > 1)
+        viewDirBelowTS = -refract(-viewDirAboveTS, normalTS, 1/_CCIOR);
+
+    float NdotV_below = dot(normalTS, viewDirBelowTS);
+
+    float CCF0 = Sq((1 - _CCIOR) / (1 + _CCIOR));
+
+    float viewDirAtten = 1;
+    // TODO compute viewDirAtten at runtime!
+    if (_CCIOR > 1)
+        viewDirAtten -= F_Schlick(CCF0, dot(viewDirAboveTS, normalTS));
+
+
+    float3 lobeWeight = _CTCoeffs.xyz * F_Schlick(_CTF0s.xyz, NdotV_below);
+    float lobeWeightSum = lobeWeight.x + lobeWeight.y + lobeWeight.z;
+    lobeWeight /= lobeWeightSum;
+    float3 cumLobeWeight = float3(lobeWeight.x, 1 - lobeWeight.z, 1); // last entry is trivially 1
+
+    float acc = 0;
+    for (uint sampleIndex = beginSampleIndex; sampleIndex < endSampleIndex; ++sampleIndex)
+    {
+        float2 uv = Hammersley2D(sampleIndex, sampleCount);
+
+        int lobeIndex = 0;
+        if (uv.x < cumLobeWeight.x)
+        {
+            lobeIndex = 0;
+            uv.x /= lobeWeight.x;
+        }
+        else if (uv.x < cumLobeWeight.y)
+        {
+            lobeIndex = 1;
+            uv.x = (uv.x - cumLobeWeight.x) / lobeWeight.y;
+        }
+        else // if (uv.x < cumLobeWeight.z)
+        {
+            lobeIndex = 2;
+            uv.x = (uv.x - cumLobeWeight.y) / lobeWeight.z;
+        }
+
+        float3 halfwayBelowTS = SampleHemisphereBeckmann(uv, _CTSpreads[lobeIndex]);
+        float3 lightDirBelowTS = reflect(-viewDirBelowTS, halfwayBelowTS);
+
+        float NdotL_below = dot(normalTS, lightDirBelowTS);
+        // Handle light below horizon
+        if (NdotL_below < 1e-6)
+            continue;
+
+        float NdotH_below = dot(normalTS, halfwayBelowTS);
+        float HdotV_below = dot(viewDirBelowTS, halfwayBelowTS);
+
+        // Recompute halfwayBelowPdf = sum_i weight[i] * D(NdotH, roughness[i])*NdotH
+        float halfwayBelowPdf = 0;
+        for (int i = 0; i < 3; ++i)
+        {
+            halfwayBelowPdf += lobeWeight[i] * D_Beckmann(NdotH_below, _CTSpreads[i]) * NdotH_below;
+        }
+
+        float lightDirBelowPdf = halfwayBelowPdf * 0.25 / HdotV_below;
+
+
+        float3 lightDirAboveTS = lightDirBelowTS;
+        float lightDirAbovePdf = lightDirBelowPdf;
+        if (_CCNoRefraction == 0 && _CCIOR > 1)
+        {
+            lightDirAboveTS = -refract(-lightDirBelowTS, normalTS, _CCIOR/1);
+            lightDirAbovePdf *= RefractionPDF(lightDirBelowTS, normalTS, _CCIOR/1);
+        }
+
+        float NdotL_above = dot(normalTS, lightDirAboveTS);
+        if (NdotL_above < 1e-6)
+            continue;
+
+        float lightDirAtten = 1;
+        if (_CCIOR > 1)
+            lightDirAtten -= F_Schlick(CCF0, NdotL_above);
+
+
+        float specularBRDF = 0;
+        for (int j = 0; j < 3; ++j)
+        {
+            float coeff = _CTCoeffs[j];
+            float roughness = _CTSpreads[j];
+            float F0 = _CTF0s[j];
+            specularBRDF += coeff * D_Beckmann(NdotH_below, roughness) * F_Schlick(F0, HdotV_below);
+        }
+        specularBRDF *= G_CookTorrance(NdotV_below, NdotL_below, NdotH_below, HdotV_below) / (NdotV_below * NdotL_below);
+
+        float weight = NdotL_above * specularBRDF * lightDirAtten; // * viewDirAtten; // multiplied in the end
+        acc += weight / lightDirAbovePdf;
+    }
+
+    return viewDirAtten * acc / sampleCount;
+}
+
+float IntegrateFGD_GGX(float NdotV, uint beginSampleIndex, uint endSampleIndex, uint sampleCount)
+{
+    float3 normalTS = float3(0, 0, 1);
+
+    float cosThetaView = NdotV;
+    float sinThetaView = sqrt(1 - Sq(cosThetaView));
+    float3 viewDirTS = float3(sinThetaView, 0, cosThetaView);
+
+    float roughness = SmoothnessToRoughness(_GGXSmoothness);
+    if (roughness == 0)
+    {
+        // Handle sample count appropriately!
+        return float(endSampleIndex - beginSampleIndex) / float(sampleCount);
+    }
+
+    float acc = 0;
+    for (uint sampleIndex = beginSampleIndex; sampleIndex < endSampleIndex; ++sampleIndex)
+    {
+        float2 uv = Hammersley2D(sampleIndex, sampleCount);
+
+        float3 halfwayTS = SampleHemisphereGGX(uv, roughness);
+        float3 lightDirTS = reflect(-viewDirTS, halfwayTS);
+
+        float NdotL = dot(normalTS, lightDirTS);
+        // Handle light below horizon
+        if (NdotL < 1e-6)
+            continue;
+
+        float NdotH = dot(normalTS, halfwayTS);
+        float HdotV = dot(viewDirTS, halfwayTS);
+
+        // \int F * V * D * NdotL * 4 * HdotV / (D * NdotH) domega
+        // \int F * V * NdotL * 4 * HdotV / NdotH domega
+
+        float F = 1;// F_Schlick(_GGXFresnelF0, HdotV);
+        float V = V_SmithJointGGX(NdotL, NdotV, roughness);
+
+        float weightOverPdf = 4 * F * V * NdotL * HdotV / NdotH;
+        acc += weightOverPdf;
+    }
+
+    return acc / sampleCount;
+}
+
+
+
+
+groupshared float2 sharedData[32];
+
+float2 GroupReduce(float2 value, int tid)
+{
+    sharedData[tid] = value;
+
+    // Final reduce in shared memory
+    // barrier();
+    AllMemoryBarrierWithGroupSync();
+
+    if (tid < 16)
+        sharedData[tid] += sharedData[tid + 16];
+    AllMemoryBarrierWithGroupSync();
+
+    if (tid < 8)
+        sharedData[tid] += sharedData[tid + 8];
+    AllMemoryBarrierWithGroupSync();
+
+    if (tid < 4)
+        sharedData[tid] += sharedData[tid + 4];
+    AllMemoryBarrierWithGroupSync();
+
+    if (tid < 2)
+        sharedData[tid] += sharedData[tid + 2];
+    AllMemoryBarrierWithGroupSync();
+
+    if (tid < 1)
+        sharedData[tid] += sharedData[tid + 1];
+    AllMemoryBarrierWithGroupSync();
+
+    return sharedData[0];
+}
+
+
+[numthreads(32,1,1)]
+void CSMain (uint3 tid : SV_DispatchThreadID)
+{
+    // TODO x-axis = sqrt(NdotV) or NdotV ???
+
+    // u coordinate of this pixel...
+    float u = ( (tid.y+0.5) / float(_OutputWidth) ); // (0, 1]
+
+    float NdotV = u;
+
+    uint sampleCount = 4096;
+    uint beginSampleIndex = tid.x * sampleCount / 32;
+    uint endSampleIndex = (tid.x+1) * sampleCount / 32;
+
+    float CTFGD = IntegrateFGD_AxFCPA2(NdotV, beginSampleIndex, endSampleIndex, sampleCount);
+    float GGXFGD = IntegrateFGD_GGX(NdotV, beginSampleIndex, endSampleIndex, sampleCount);
+    float FlakesFGD = 1; // TODO FlakesFGD?
+
+    float IBLSmoothness = _GGXSmoothness; // TODO IBLSmoothness
+
+    // reduce across thread group
+    float2 temp = GroupReduce(float2(CTFGD, GGXFGD), tid.x);
+    CTFGD = temp.x;
+    GGXFGD = temp.y;
+
+    if (tid.x == 0)
+        _Output[int2(tid.y, 0)] = float4(CTFGD, GGXFGD, FlakesFGD, IBLSmoothness);
+}
